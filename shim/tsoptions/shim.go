@@ -9,7 +9,6 @@ import "github.com/microsoft/typescript-go/internal/core"
 import "github.com/microsoft/typescript-go/internal/diagnostics"
 import "github.com/microsoft/typescript-go/internal/tsoptions"
 import "github.com/microsoft/typescript-go/internal/tspath"
-import "reflect"
 import _ "unsafe"
 
 type AlternateModeDiagnostics = tsoptions.AlternateModeDiagnostics
@@ -47,8 +46,6 @@ type DidYouMeanOptionsDiagnostics = tsoptions.DidYouMeanOptionsDiagnostics
 type ExtendedConfigCache = tsoptions.ExtendedConfigCache
 type ExtendedConfigCacheEntry = tsoptions.ExtendedConfigCacheEntry
 type FileExtensionInfo = tsoptions.FileExtensionInfo
-//go:linkname ForEachCompilerOptionValue github.com/microsoft/typescript-go/internal/tsoptions.ForEachCompilerOptionValue
-func ForEachCompilerOptionValue(options *core.CompilerOptions, declFilter func(*tsoptions.CommandLineOption) bool, fn func(option *tsoptions.CommandLineOption, value reflect.Value, i int) bool) bool
 //go:linkname GetCallbackForFindingPropertyAssignmentByValue github.com/microsoft/typescript-go/internal/tsoptions.GetCallbackForFindingPropertyAssignmentByValue
 func GetCallbackForFindingPropertyAssignmentByValue(value string) func(property *ast.PropertyAssignment) *ast.Node
 //go:linkname GetDefaultLibFileName github.com/microsoft/typescript-go/internal/tsoptions.GetDefaultLibFileName
