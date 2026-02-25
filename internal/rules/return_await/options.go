@@ -4,7 +4,6 @@ package return_await
 
 import "github.com/go-json-experiment/json"
 import "fmt"
-import "reflect"
 
 type ReturnAwaitOptions string
 
@@ -13,7 +12,7 @@ const ReturnAwaitOptionsErrorHandlingCorrectnessOnly ReturnAwaitOptions = "error
 const ReturnAwaitOptionsInTryCatch ReturnAwaitOptions = "in-try-catch"
 const ReturnAwaitOptionsNever ReturnAwaitOptions = "never"
 
-var enumValues_ReturnAwaitOptions = []interface{}{
+var enumValues_ReturnAwaitOptions = []string{
 	"always",
 	"error-handling-correctness-only",
 	"in-try-catch",
@@ -34,7 +33,7 @@ func (j *ReturnAwaitOptions) UnmarshalJSON(value []byte) error {
 	}
 	var ok bool
 	for _, expected := range enumValues_ReturnAwaitOptions {
-		if reflect.DeepEqual(v, expected) {
+		if v == expected {
 			ok = true
 			break
 		}

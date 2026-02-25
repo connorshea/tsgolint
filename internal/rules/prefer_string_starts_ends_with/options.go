@@ -4,7 +4,6 @@ package prefer_string_starts_ends_with
 
 import "github.com/go-json-experiment/json"
 import "fmt"
-import "reflect"
 
 type PreferStringStartsEndsWithOptions struct {
 	// Whether to allow equality checks against the first or last element of a string.
@@ -16,7 +15,7 @@ type PreferStringStartsEndsWithOptionsAllowSingleElementEquality string
 const PreferStringStartsEndsWithOptionsAllowSingleElementEqualityAlways PreferStringStartsEndsWithOptionsAllowSingleElementEquality = "always"
 const PreferStringStartsEndsWithOptionsAllowSingleElementEqualityNever PreferStringStartsEndsWithOptionsAllowSingleElementEquality = "never"
 
-var enumValues_PreferStringStartsEndsWithOptionsAllowSingleElementEquality = []interface{}{
+var enumValues_PreferStringStartsEndsWithOptionsAllowSingleElementEquality = []string{
 	"always",
 	"never",
 }
@@ -29,7 +28,7 @@ func (j *PreferStringStartsEndsWithOptionsAllowSingleElementEquality) UnmarshalJ
 	}
 	var ok bool
 	for _, expected := range enumValues_PreferStringStartsEndsWithOptionsAllowSingleElementEquality {
-		if reflect.DeepEqual(v, expected) {
+		if v == expected {
 			ok = true
 			break
 		}

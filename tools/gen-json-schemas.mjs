@@ -124,6 +124,18 @@ for (const schemaDir of schemaDirs) {
       }
     }
 
+    // Replace reflect.DeepEqual with simple == for string enum validation.
+    // go-jsonschema generates reflect.DeepEqual to compare enum values, but since
+    // these are always strings, == is equivalent and avoids pulling in the reflect
+    // package, which inhibits dead code elimination in the Go linker.
+    if (content.includes('reflect.DeepEqual')) {
+      content = content.replace(/reflect\.DeepEqual\(v, expected\)/g, 'v == expected');
+      content = content.replace(/^import "reflect"\n/m, '');
+      // Also narrow []interface{} enum slices to []string since all values are strings
+      content = content.replace(/^(var enumValues_\w+ = )\[\]interface\{\}/gm, '$1[]string');
+      modified = true;
+    }
+
     // If the schema uses shared_schemas.json (TypeOrValueSpecifier), replace generated
     // interface{} types with proper utils.TypeOrValueSpecifier imports.
     const hasTypeOrValueSpecifier = /\bTypeOrValueSpecifier\b/.test(content);

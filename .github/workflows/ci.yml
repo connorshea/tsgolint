@@ -84,16 +84,39 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0 # required for git am --3way to work properly
-          submodules: true
           persist-credentials: false
 
-      - uses: ./.github/actions/setup
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      - name: Sparse checkout typescript-go submodule
+        run: |
+          commit=$(git ls-tree HEAD typescript-go | awk '{print $3}')
+          rmdir typescript-go
+          git init typescript-go
+          cd typescript-go
+          git sparse-checkout init --cone
+          git sparse-checkout set internal
+          git remote add origin https://github.com/microsoft/typescript-go.git
+          git fetch --depth=1 --filter=blob:none origin "$commit"
+          git checkout "$commit"
+
+      - name: Apply patches and expose collections
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions"
+          cd typescript-go
+          git am --no-gpg-sign ../patches/*.patch
+          cd ..
+          mkdir -p internal/collections
+          find ./typescript-go/internal/collections -type f ! -name '*_test.go' -exec cp {} internal/collections/ \;
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
           version: latest
+          args: ./cmd/... ./internal/...
 
   typos:
     name: Typos
