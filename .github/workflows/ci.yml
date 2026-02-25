@@ -104,6 +104,8 @@ jobs:
 
       - name: Apply patches and expose collections
         run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions"
           cd typescript-go
           git am --no-gpg-sign ../patches/*.patch
           cd ..
