@@ -16,11 +16,13 @@ func TrimNodeTextRange(sourceFile *ast.SourceFile, node *ast.Node) core.TextRang
 	return scanner.GetRangeOfTokenAtPosition(sourceFile, node.Pos()).WithEnd(node.End())
 }
 
-func GetCommentsInRange(sourceFile *ast.SourceFile, inRange core.TextRange) iter.Seq[ast.CommentRange] {
-	nodeFactory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
+// Shared stateless NodeFactory for comment scanning, created once to avoid
+// per-call allocation overhead.
+var commentNodeFactory = ast.NewNodeFactory(ast.NodeFactoryHooks{})
 
+func GetCommentsInRange(sourceFile *ast.SourceFile, inRange core.TextRange) iter.Seq[ast.CommentRange] {
 	return func(yield func(ast.CommentRange) bool) {
-		for commentRange := range scanner.GetTrailingCommentRanges(nodeFactory, sourceFile.Text(), inRange.Pos()) {
+		for commentRange := range scanner.GetTrailingCommentRanges(commentNodeFactory, sourceFile.Text(), inRange.Pos()) {
 			if commentRange.Pos() >= inRange.End() {
 				break
 			}
@@ -29,7 +31,7 @@ func GetCommentsInRange(sourceFile *ast.SourceFile, inRange core.TextRange) iter
 			}
 		}
 
-		for commentRange := range scanner.GetLeadingCommentRanges(nodeFactory, sourceFile.Text(), inRange.Pos()) {
+		for commentRange := range scanner.GetLeadingCommentRanges(commentNodeFactory, sourceFile.Text(), inRange.Pos()) {
 			if commentRange.Pos() >= inRange.End() {
 				break
 			}
@@ -138,7 +140,11 @@ func Every[T any](slice []T, f func(T) bool) bool {
 
 // Source: typescript-go/internal/core/core.go
 func Flatten[T any](array [][]T) []T {
-	var result []T
+	n := 0
+	for _, subArray := range array {
+		n += len(subArray)
+	}
+	result := make([]T, 0, n)
 	for _, subArray := range array {
 		result = append(result, subArray...)
 	}

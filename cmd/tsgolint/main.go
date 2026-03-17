@@ -516,20 +516,24 @@ func runMain() int {
 		}
 	})
 
+	// Pre-compute the configured rules slice once since standalone mode uses the
+	// same rules for every file, avoiding a new allocation per file.
+	configuredRules := utils.Map(allRules, func(r rule.Rule) linter.ConfiguredRule {
+		return linter.ConfiguredRule{
+			Name: r.Name,
+			Run: func(ctx rule.RuleContext) rule.RuleListeners {
+				return r.Run(ctx, nil)
+			},
+		}
+	})
+
 	err = linter.RunLinterOnProgram(
 		utils.GetLogLevel(),
 		program,
 		files,
 		runtime.GOMAXPROCS(0),
 		func(sourceFile *ast.SourceFile) []linter.ConfiguredRule {
-			return utils.Map(allRules, func(r rule.Rule) linter.ConfiguredRule {
-				return linter.ConfiguredRule{
-					Name: r.Name,
-					Run: func(ctx rule.RuleContext) rule.RuleListeners {
-						return r.Run(ctx, nil)
-					},
-				}
-			})
+			return configuredRules
 		},
 		func(d rule.RuleDiagnostic) {
 			diagnosticsChan <- d

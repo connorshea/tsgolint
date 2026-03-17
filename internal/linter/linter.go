@@ -332,6 +332,84 @@ func RunLinterOnProgram(logLevel utils.LogLevel, program *compiler.Program, file
 				ReportNodeWithSuggestions:       ctxBuilder.reportNodeWithSuggestions,
 			}
 
+			// Define visitor closures once per worker (outside the per-file loop)
+			// to avoid re-creating them for every file. They only capture
+			// per-worker state (registeredListeners, ctxBuilder).
+			runListeners := func(kind ast.Kind, node *ast.Node) {
+				if listeners, ok := registeredListeners[kind]; ok {
+					for _, listener := range listeners {
+						ctxBuilder.ruleName = listener.ruleName
+						listener.fn(node)
+					}
+				}
+			}
+
+			/* convert.ts -> allowPattern:
+			catch name
+			variabledeclaration name
+			forinstatement initializer
+			forofstatement initializer
+			(propagation) allowPattern > arrayliteralexpression elements
+			(propagation) allowPattern > objectliteralexpression properties
+			(propagation) allowPattern > spreadassignment,spreadelement expression
+			(propagation) allowPattern > propertyassignment value
+			arraybindingpattern elements
+			objectbindingpattern elements
+			(init) binaryexpression(with '=' operator') left
+			*/
+
+			var childVisitor ast.Visitor
+			var patternVisitor func(node *ast.Node)
+			patternVisitor = func(node *ast.Node) {
+				runListeners(node.Kind, node)
+				kind := rule.ListenerOnAllowPattern(node.Kind)
+				runListeners(kind, node)
+
+				switch node.Kind {
+				case ast.KindArrayLiteralExpression:
+					for _, element := range node.AsArrayLiteralExpression().Elements.Nodes {
+						patternVisitor(element)
+					}
+				case ast.KindObjectLiteralExpression:
+					for _, property := range node.AsObjectLiteralExpression().Properties.Nodes {
+						patternVisitor(property)
+					}
+				case ast.KindSpreadElement, ast.KindSpreadAssignment:
+					patternVisitor(node.Expression())
+				case ast.KindPropertyAssignment:
+					patternVisitor(node.Initializer())
+				default:
+					node.ForEachChild(childVisitor)
+				}
+
+				runListeners(rule.ListenerOnExit(kind), node)
+				runListeners(rule.ListenerOnExit(node.Kind), node)
+			}
+			childVisitor = func(node *ast.Node) bool {
+				runListeners(node.Kind, node)
+
+				switch node.Kind {
+				case ast.KindArrayLiteralExpression, ast.KindObjectLiteralExpression:
+					kind := rule.ListenerOnNotAllowPattern(node.Kind)
+					runListeners(kind, node)
+					node.ForEachChild(childVisitor)
+					runListeners(rule.ListenerOnExit(kind), node)
+				default:
+					if ast.IsAssignmentExpression(node, true) {
+						expr := node.AsBinaryExpression()
+						patternVisitor(expr.Left)
+						childVisitor(expr.OperatorToken)
+						childVisitor(expr.Right)
+					} else {
+						node.ForEachChild(childVisitor)
+					}
+				}
+
+				runListeners(rule.ListenerOnExit(node.Kind), node)
+
+				return false
+			}
+
 			for w := range workloadQueue {
 				ctxBuilder.program = w.program
 				ctxBuilder.checker = w.checker
@@ -357,80 +435,6 @@ func RunLinterOnProgram(logLevel utils.LogLevel, program *compiler.Program, file
 						}
 					}
 
-					runListeners := func(kind ast.Kind, node *ast.Node) {
-						if listeners, ok := registeredListeners[kind]; ok {
-							for _, listener := range listeners {
-								ctxBuilder.ruleName = listener.ruleName
-								listener.fn(node)
-							}
-						}
-					}
-
-					/* convert.ts -> allowPattern:
-					catch name
-					variabledeclaration name
-					forinstatement initializer
-					forofstatement initializer
-					(propagation) allowPattern > arrayliteralexpression elements
-					(propagation) allowPattern > objectliteralexpression properties
-					(propagation) allowPattern > spreadassignment,spreadelement expression
-					(propagation) allowPattern > propertyassignment value
-					arraybindingpattern elements
-					objectbindingpattern elements
-					(init) binaryexpression(with '=' operator') left
-					*/
-
-					var childVisitor ast.Visitor
-					var patternVisitor func(node *ast.Node)
-					patternVisitor = func(node *ast.Node) {
-						runListeners(node.Kind, node)
-						kind := rule.ListenerOnAllowPattern(node.Kind)
-						runListeners(kind, node)
-
-						switch node.Kind {
-						case ast.KindArrayLiteralExpression:
-							for _, element := range node.AsArrayLiteralExpression().Elements.Nodes {
-								patternVisitor(element)
-							}
-						case ast.KindObjectLiteralExpression:
-							for _, property := range node.AsObjectLiteralExpression().Properties.Nodes {
-								patternVisitor(property)
-							}
-						case ast.KindSpreadElement, ast.KindSpreadAssignment:
-							patternVisitor(node.Expression())
-						case ast.KindPropertyAssignment:
-							patternVisitor(node.Initializer())
-						default:
-							node.ForEachChild(childVisitor)
-						}
-
-						runListeners(rule.ListenerOnExit(kind), node)
-						runListeners(rule.ListenerOnExit(node.Kind), node)
-					}
-					childVisitor = func(node *ast.Node) bool {
-						runListeners(node.Kind, node)
-
-						switch node.Kind {
-						case ast.KindArrayLiteralExpression, ast.KindObjectLiteralExpression:
-							kind := rule.ListenerOnNotAllowPattern(node.Kind)
-							runListeners(kind, node)
-							node.ForEachChild(childVisitor)
-							runListeners(rule.ListenerOnExit(kind), node)
-						default:
-							if ast.IsAssignmentExpression(node, true) {
-								expr := node.AsBinaryExpression()
-								patternVisitor(expr.Left)
-								childVisitor(expr.OperatorToken)
-								childVisitor(expr.Right)
-							} else {
-								node.ForEachChild(childVisitor)
-							}
-						}
-
-						runListeners(rule.ListenerOnExit(node.Kind), node)
-
-						return false
-					}
 					file.Node.ForEachChild(childVisitor)
 					// Instead of clearing the map, we clear the slices in-place to avoid re-allocating memory for the listeners on each file.
 					for k := range registeredListeners {

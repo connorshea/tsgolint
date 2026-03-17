@@ -142,18 +142,21 @@ type headlessMessagePayloadError struct {
 	Error string `json:"error"`
 }
 
-// Unified diagnostic type for channel
+// Unified diagnostic type for channel.
+// Uses an isRule flag + embedded values to avoid heap-escaping pointer allocations
+// on every diagnostic sent through the channel.
 type anyDiagnostic struct {
-	ruleDiagnostic     *rule.RuleDiagnostic
-	internalDiagnostic *diagnostic.Internal
+	isRule             bool
+	ruleDiagnostic     rule.RuleDiagnostic
+	internalDiagnostic diagnostic.Internal
 }
 
 func ruleToAny(d rule.RuleDiagnostic) anyDiagnostic {
-	return anyDiagnostic{ruleDiagnostic: &d}
+	return anyDiagnostic{isRule: true, ruleDiagnostic: d}
 }
 
 func internalToAny(d diagnostic.Internal) anyDiagnostic {
-	return anyDiagnostic{internalDiagnostic: &d}
+	return anyDiagnostic{isRule: false, internalDiagnostic: d}
 }
 
 func writeMessage(w io.Writer, messageType headlessMessageType, payload any) error {
@@ -274,11 +277,6 @@ func runHeadless(args []string) int {
 		}
 	}
 
-	allRulesByName := make(map[string]rule.Rule, len(allRules))
-	for _, r := range allRules {
-		allRulesByName[r.Name] = r
-	}
-
 	for _, files := range workload.Programs {
 		slices.SortFunc(files, func(a, b string) int {
 			return len(b) - len(a)
@@ -301,9 +299,9 @@ func runHeadless(args []string) int {
 		for d := range diagnosticsChan {
 			var hd headlessDiagnostic
 
-			if d.ruleDiagnostic != nil {
+			if d.isRule {
 				// Rule diagnostic
-				rd := d.ruleDiagnostic
+				rd := &d.ruleDiagnostic
 				filePath := rd.SourceFile.FileName()
 				hd = headlessDiagnostic{
 					Kind:          headlessDiagnosticKindRule,
@@ -339,9 +337,9 @@ func runHeadless(args []string) int {
 						}
 					}
 				}
-			} else if d.internalDiagnostic != nil {
+			} else {
 				// Internal diagnostic (tsconfig, type error, etc.)
-				internalDiagnostic := d.internalDiagnostic
+				internalDiagnostic := &d.internalDiagnostic
 
 				hd = headlessDiagnostic{
 					Kind:  headlessDiagnosticKindTsconfig,
