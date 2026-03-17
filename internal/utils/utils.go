@@ -2,7 +2,9 @@ package utils
 
 import (
 	"iter"
+	"reflect"
 	"slices"
+	"sync"
 	"unicode"
 
 	"github.com/go-json-experiment/json"
@@ -184,19 +186,63 @@ func IsStringWhiteSpace(s string) bool {
 	return true
 }
 
+// optionsCacheKey identifies a cached deserialized options value by target type
+// and the pointer identity of the source options value.
+type optionsCacheKey struct {
+	targetType reflect.Type
+	optionsPtr uintptr
+}
+
+var optionsCache sync.Map
+
+// ResetOptionsCache clears the options cache. Intended for benchmarking.
+func ResetOptionsCache() {
+	optionsCache = sync.Map{}
+}
+
 // UnmarshalOptions unmarshals rule options with proper JSON default handling.
 // It accepts options as either the target type T or as any, and ensures that
 // JSON unmarshalling occurs to apply default values defined in UnmarshalJSON.
+// Results are cached by the pointer identity of the options value and the target
+// type, so repeated calls with the same options map (e.g. across files sharing
+// a rule config) skip the marshal/unmarshal round-trip.
 func UnmarshalOptions[T any](options any, ruleName string) T {
-	var result T
+	targetType := reflect.TypeFor[T]()
 
-	// Always marshal and unmarshal to ensure defaults are applied via UnmarshalJSON
+	// Try to extract a stable pointer from the options value for cache lookup.
+	// In headless mode, files sharing the same config reuse the same options map,
+	// so pointer identity is a reliable and cheap cache key.
+	canCache := true
+	var ptr uintptr
+	if options != nil {
+		v := reflect.ValueOf(options)
+		switch v.Kind() {
+		case reflect.Map, reflect.Pointer:
+			ptr = v.Pointer()
+		default:
+			canCache = false
+		}
+	}
+
+	if canCache {
+		key := optionsCacheKey{targetType: targetType, optionsPtr: ptr}
+		if cached, ok := optionsCache.Load(key); ok {
+			return cached.(T)
+		}
+	}
+
+	var result T
 	optsBytes, err := json.Marshal(options)
 	if err != nil {
 		panic(ruleName + ": failed to marshal options: " + err.Error())
 	}
 	if err := json.Unmarshal(optsBytes, &result); err != nil {
 		panic(ruleName + ": failed to unmarshal options: " + err.Error())
+	}
+
+	if canCache {
+		key := optionsCacheKey{targetType: targetType, optionsPtr: ptr}
+		optionsCache.Store(key, result)
 	}
 
 	return result
