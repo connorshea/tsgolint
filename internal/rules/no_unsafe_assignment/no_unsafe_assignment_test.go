@@ -113,6 +113,21 @@ func TestNoUnsafeAssignmentRule(t *testing.T) {
 	rule_tester.RunRuleTester(fixtures.GetRootDir(), "tsconfig.noImplicitThis.json", t, &NoUnsafeAssignmentRule, []rule_tester.ValidTestCase{
 		{Code: "const x = 1;"},
 		{Code: "const x: number = 1;"},
+		// Expression kinds whose result type can never be `any`, so the sender's
+		// type is never queried. See canSkipSenderTypeCheck.
+		{Code: `
+declare const anyValue: any;
+const a: boolean = !anyValue;
+const b: number = -anyValue;
+const c: number = anyValue++;
+const d: string = ` + "`${anyValue}`" + `;
+const e: string = typeof anyValue;
+const f: undefined = void anyValue;
+const g: boolean = delete anyValue.x;
+const h: boolean = anyValue === 1;
+const i: boolean = anyValue instanceof Date;
+const j: boolean = 'x' in anyValue;
+    `},
 		{Code: `
 const x = 1,
   y = 1;

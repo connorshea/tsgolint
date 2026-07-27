@@ -58,6 +58,27 @@ func buildUnnecessaryTypeAssertionDiagnostic(assertion core.TextRange, expressio
 	}
 }
 
+// unionTypeFlags ORs together the flags of a type's union parts, without the
+// single-element slice `utils.UnionTypeParts` allocates for non-union types.
+func unionTypeFlags(t *checker.Type) checker.TypeFlags {
+	if !utils.IsUnionType(t) {
+		return checker.Type_flags(t)
+	}
+	var flags checker.TypeFlags
+	for _, part := range t.Types() {
+		flags |= checker.Type_flags(part)
+	}
+	return flags
+}
+
+func isAnyPart(part *checker.Type) bool {
+	return utils.IsTypeFlagSet(part, checker.TypeFlagsAny)
+}
+
+func isTypeVariablePart(part *checker.Type) bool {
+	return utils.IsTypeFlagSet(part, checker.TypeFlagsTypeVariable|checker.TypeFlagsIndex)
+}
+
 var NoUnnecessaryTypeAssertionRule = rule.Rule{
 	Name: "no-unnecessary-type-assertion",
 	Run: func(ctx rule.RuleContext, options any) rule.RuleListeners {
@@ -189,14 +210,14 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 			if predicate(t) {
 				return true
 			}
-			for _, part := range utils.UnionTypeParts(t) {
-				if part != t && typeContains(part, predicate, seenTypes, activeSignatures) {
-					return true
-				}
-			}
-			for _, part := range utils.IntersectionTypeParts(t) {
-				if part != t && typeContains(part, predicate, seenTypes, activeSignatures) {
-					return true
+			// `UnionTypeParts`/`IntersectionTypeParts` allocate a single-element slice
+			// for types that are neither, and that element is `t` itself, which the
+			// `part != t` guard skips anyway. Read `Types()` directly instead.
+			if utils.IsUnionType(t) || utils.IsIntersectionType(t) {
+				for _, part := range t.Types() {
+					if part != t && typeContains(part, predicate, seenTypes, activeSignatures) {
+						return true
+					}
 				}
 			}
 			for _, typeArgument := range getTypeArguments(t) {
@@ -231,16 +252,34 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 			return false
 		}
 
+		// `typeContains` walks unions, intersections, type arguments and every call
+		// signature's parameter and return types, so it is by far the most expensive
+		// predicate in this rule. Both of its uses are asked about the same handful
+		// of types over and over within a file, so memoize them on the root type.
+		// The scratch maps are reused across calls: a walk never starts while
+		// another one is in progress, since neither predicate queries the checker.
+		containsAnyCache := map[*checker.Type]bool{}
+		containsTypeVariableCache := map[*checker.Type]bool{}
+		seenTypes := map[*checker.Type]struct{}{}
+		activeSignatures := map[*checker.Signature]struct{}{}
+
+		typeContainsCached := func(t *checker.Type, predicate func(*checker.Type) bool, cache map[*checker.Type]bool) bool {
+			if result, ok := cache[t]; ok {
+				return result
+			}
+			clear(seenTypes)
+			clear(activeSignatures)
+			result := typeContains(t, predicate, seenTypes, activeSignatures)
+			cache[t] = result
+			return result
+		}
+
 		containsAny := func(t *checker.Type) bool {
-			return typeContains(t, func(part *checker.Type) bool {
-				return utils.IsTypeFlagSet(part, checker.TypeFlagsAny)
-			}, map[*checker.Type]struct{}{}, map[*checker.Signature]struct{}{})
+			return typeContainsCached(t, isAnyPart, containsAnyCache)
 		}
 
 		containsTypeVariable := func(t *checker.Type) bool {
-			return typeContains(t, func(part *checker.Type) bool {
-				return utils.IsTypeFlagSet(part, checker.TypeFlagsTypeVariable|checker.TypeFlagsIndex)
-			}, map[*checker.Type]struct{}{}, map[*checker.Signature]struct{}{})
+			return typeContainsCached(t, isTypeVariablePart, containsTypeVariableCache)
 		}
 
 		hasIndexSignature := func(t *checker.Type) bool {
@@ -450,12 +489,7 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 			if utils.IsNullableType(ctx.TypeChecker, t) {
 				return true
 			}
-			for _, part := range utils.UnionTypeParts(t) {
-				if utils.IsTypeFlagSet(part, checker.TypeFlagsAny|checker.TypeFlagsUnknown|checker.TypeFlagsVoid) {
-					return true
-				}
-			}
-			return false
+			return unionTypeFlags(t)&(checker.TypeFlagsAny|checker.TypeFlagsUnknown|checker.TypeFlagsVoid) != 0
 		}
 
 		isIIFE := func(expression *ast.Node) bool {
@@ -890,7 +924,11 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 			return false
 		}
 
-		isInGenericContext := func(node *ast.Node) bool {
+		// A single assertion can ask this up to three times (the skip check, the
+		// phantom type argument check and the inferred callback return check), and
+		// answering walks every enclosing call resolving its callee's type.
+		isInGenericContextCache := map[*ast.Node]bool{}
+		isInGenericContextUncached := func(node *ast.Node) bool {
 			seenFunction := false
 			for current := node.Parent; current != nil; current = current.Parent {
 				if current.Kind == ast.KindFunctionDeclaration {
@@ -921,6 +959,15 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 				}
 			}
 			return false
+		}
+
+		isInGenericContext := func(node *ast.Node) bool {
+			if result, ok := isInGenericContextCache[node]; ok {
+				return result
+			}
+			result := isInGenericContextUncached(node)
+			isInGenericContextCache[node] = result
+			return result
 		}
 
 		isPropertyInInferredCallbackReturn := func(node *ast.Node) bool {
@@ -958,14 +1005,16 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 					isPropertyInProblematicContext(node)
 			}
 
+			// Ordered cheapest-first: the purely syntactic predicates run before the
+			// ones that resolve signatures or contextual types.
 			if skipParentTypeForContextualAny(node) ||
 				ast.IsArrayLiteralExpression(node.Expression()) ||
-				isNestedInArrayLiteralArgumentToGenericCall(node) ||
 				isInDestructuringDeclaration(node) ||
-				isPropertyInProblematicContext(node) ||
-				isPropertyInInferredCallbackReturn(node) ||
 				isAssignmentInNonStatementContext(node) ||
 				isRightHandSideOfLogicalAssignment(node) ||
+				isNestedInArrayLiteralArgumentToGenericCall(node) ||
+				isPropertyInProblematicContext(node) ||
+				isPropertyInInferredCallbackReturn(node) ||
 				isArgumentToOverloadedFunction(node) {
 				return true
 			}
@@ -1071,7 +1120,8 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 
 		checkTypeAssertion := func(node *ast.Node) {
 			typeNode := node.Type()
-			if slices.Contains(opts.TypesToIgnore, strings.TrimSpace(ctx.SourceFile.Text()[typeNode.Pos():typeNode.End()])) {
+			if len(opts.TypesToIgnore) > 0 &&
+				slices.Contains(opts.TypesToIgnore, strings.TrimSpace(ctx.SourceFile.Text()[typeNode.Pos():typeNode.End()])) {
 				return
 			}
 
@@ -1195,17 +1245,11 @@ var NoUnnecessaryTypeAssertionRule = rule.Rule{
 						return
 					}
 
-					var tFlags checker.TypeFlags
-					for _, part := range utils.UnionTypeParts(constrainedType) {
-						tFlags |= checker.Type_flags(part)
-					}
+					tFlags := unionTypeFlags(constrainedType)
 
 					contextualType := utils.GetContextualType(ctx.TypeChecker, node)
 					if contextualType != nil {
-						var contextualFlags checker.TypeFlags
-						for _, part := range utils.UnionTypeParts(contextualType) {
-							contextualFlags |= checker.Type_flags(part)
-						}
+						contextualFlags := unionTypeFlags(contextualType)
 
 						if tFlags&checker.TypeFlagsUnknown != 0 && contextualFlags&checker.TypeFlagsUnknown == 0 {
 							return

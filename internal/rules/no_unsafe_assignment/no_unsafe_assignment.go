@@ -199,9 +199,39 @@ func canSkipSenderTypeCheck(node *ast.Node, compType comparisonType) bool {
 		ast.KindFalseKeyword,
 		ast.KindNullKeyword:
 		return true
-	case ast.KindPrefixUnaryExpression:
-		expr := node.AsPrefixUnaryExpression()
-		return (expr.Operator == ast.KindPlusToken || expr.Operator == ast.KindMinusToken) && ast.SkipParentheses(expr.Operand).Kind == ast.KindNumericLiteral
+	case ast.KindPrefixUnaryExpression,
+		ast.KindPostfixUnaryExpression:
+		// `+x`, `-x`, `~x`, `++x`, `x--`, ... always evaluate to `number`/`bigint`,
+		// and `!x` always evaluates to `boolean`, whatever the operand's type is.
+		return true
+	case ast.KindTypeOfExpression,
+		ast.KindVoidExpression,
+		ast.KindDeleteExpression,
+		ast.KindTemplateExpression:
+		// `typeof x` is a union of string literals, `void x` is `undefined`,
+		// `delete x` is `boolean`, and a template expression is a `string` or a
+		// template literal type.
+		return true
+	case ast.KindBinaryExpression:
+		// Relational, equality, `instanceof` and `in` expressions always evaluate
+		// to `boolean`. Every other operator can produce `any`: the arithmetic and
+		// bitwise operators fall back to the error type on invalid operands, `+`
+		// widens to `any`, and the logical/assignment operators propagate an
+		// operand's type.
+		switch node.AsBinaryExpression().OperatorToken.Kind {
+		case ast.KindLessThanToken,
+			ast.KindGreaterThanToken,
+			ast.KindLessThanEqualsToken,
+			ast.KindGreaterThanEqualsToken,
+			ast.KindEqualsEqualsToken,
+			ast.KindExclamationEqualsToken,
+			ast.KindEqualsEqualsEqualsToken,
+			ast.KindExclamationEqualsEqualsToken,
+			ast.KindInstanceOfKeyword,
+			ast.KindInKeyword:
+			return true
+		}
+		return false
 	case ast.KindArrowFunction,
 		ast.KindFunctionExpression,
 		ast.KindClassExpression:
@@ -255,9 +285,12 @@ var NoUnsafeAssignmentRule = rule.Rule{
 			if propertySymbols == nil {
 				return false
 			}
-			properties := make(map[string]*checker.Type, len(propertySymbols))
+			// Only the properties named by the destructuring pattern are ever looked
+			// up, so map names to symbols here and resolve each symbol's type on
+			// demand instead of resolving every property of the sender type.
+			properties := make(map[string]*ast.Symbol, len(propertySymbols))
 			for _, property := range propertySymbols {
-				properties[property.Name] = ctx.TypeChecker.GetTypeOfSymbolAtLocation(property, senderNode)
+				properties[property.Name] = property
 			}
 
 			checkObjectProperty := func(propertyKey *ast.Node, propertyValue *ast.Node) bool {
@@ -271,10 +304,11 @@ var NoUnsafeAssignmentRule = rule.Rule{
 					return false
 				}
 
-				senderType, ok := properties[key]
+				property, ok := properties[key]
 				if !ok {
 					return false
 				}
+				senderType := ctx.TypeChecker.GetTypeOfSymbolAtLocation(property, senderNode)
 
 				// check for the any type first so we can handle {x: {y: z}} = {x: any}
 				if utils.IsTypeAnyType(senderType) {
@@ -441,11 +475,21 @@ var NoUnsafeAssignmentRule = rule.Rule{
 		}
 
 		// returns true if the assignment reported
+		// primaryRange is only needed once a diagnostic is actually reported, so it
+		// is resolved lazily: `assignmentRelationRange` scans tokens, and the
+		// overwhelming majority of checked assignments report nothing.
+		primaryRange := func(receiverNode, senderNode, primaryRangeNode *ast.Node) core.TextRange {
+			if primaryRangeNode != nil {
+				return utils.TrimNodeTextRange(ctx.SourceFile, primaryRangeNode)
+			}
+			return assignmentRelationRange(ctx.SourceFile, receiverNode, senderNode)
+		}
+
 		checkAssignment := func(
 			receiverNode *ast.Node,
 			senderNode *ast.Node,
 			typeAnnotationNode *ast.Node,
-			primaryRange core.TextRange,
+			primaryRangeNode *ast.Node,
 			compType comparisonType,
 		) bool {
 			// Fast path: return early when we know that the sender definitely cannot have an `any` type,
@@ -492,7 +536,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 						thisType := utils.GetConstrainedTypeAtLocation(ctx.TypeChecker, thisExpression)
 						if utils.IsTypeAnyType(thisType) {
 							diagnostic := buildThisAssignmentDiagnostic(
-								primaryRange,
+								primaryRange(receiverNode, senderNode, primaryRangeNode),
 								utils.TrimNodeTextRange(ctx.SourceFile, thisExpression),
 								receiverRange,
 								diagnosticTypeText(ctx.TypeChecker, thisType),
@@ -507,7 +551,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 				}
 
 				diagnostic := buildAssignmentDiagnostic(
-					primaryRange,
+					primaryRange(receiverNode, senderNode, primaryRangeNode),
 					utils.TrimNodeTextRange(ctx.SourceFile, senderNode),
 					receiverRange,
 					diagnosticTypeText(ctx.TypeChecker, senderType),
@@ -539,7 +583,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 			}
 
 			ctx.ReportDiagnostic(buildAssignmentDiagnostic(
-				primaryRange,
+				primaryRange(receiverNode, senderNode, primaryRangeNode),
 				utils.TrimNodeTextRange(ctx.SourceFile, senderNode),
 				localTargetRange(ctx.SourceFile, receiverNode, typeAnnotationNode),
 				diagnosticTypeText(ctx.TypeChecker, sender),
@@ -560,7 +604,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 			return comparisonTypeNone
 		}
 
-		checkAssignmentFull := func(id *ast.Node, init *ast.Node, typeAnnotationNode *ast.Node, primaryRange core.TextRange) {
+		checkAssignmentFull := func(id *ast.Node, init *ast.Node, typeAnnotationNode *ast.Node, primaryRangeNode *ast.Node) {
 			if id == nil || init == nil {
 				return
 			}
@@ -568,7 +612,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 				id,
 				init,
 				typeAnnotationNode,
-				primaryRange,
+				primaryRangeNode,
 				// the variable already has some form of a type to compare against
 				comparisonTypeBasic,
 			)
@@ -592,7 +636,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 					node.Name(),
 					initializer,
 					node.Type(),
-					assignmentRelationRange(ctx.SourceFile, node.Name(), initializer),
+					nil,
 					getComparisonType(node),
 				)
 			},
@@ -608,27 +652,27 @@ var NoUnsafeAssignmentRule = rule.Rule{
 					expr.Left,
 					expr.Right,
 					nil,
-					utils.TrimNodeTextRange(ctx.SourceFile, expr.OperatorToken),
+					expr.OperatorToken,
 				)
 			},
 
 			// ESTree AssignmentPattern
 			ast.KindBindingElement: func(node *ast.Node) {
 				if initializer := node.Initializer(); initializer != nil {
-					checkAssignmentFull(node.Name(), initializer, node.Type(), assignmentRelationRange(ctx.SourceFile, node.Name(), initializer))
+					checkAssignmentFull(node.Name(), initializer, node.Type(), nil)
 				}
 			},
 			// ESTree AssignmentPattern
 			ast.KindParameter: func(node *ast.Node) {
 				if initializer := node.Initializer(); initializer != nil {
-					checkAssignmentFull(node.Name(), initializer, node.Type(), assignmentRelationRange(ctx.SourceFile, node.Name(), initializer))
+					checkAssignmentFull(node.Name(), initializer, node.Type(), nil)
 				}
 			},
 			// ESTree AssignmentPattern
 			ast.KindShorthandPropertyAssignment: func(node *ast.Node) {
 				assignment := node.AsShorthandPropertyAssignment()
 				if initializer := assignment.ObjectAssignmentInitializer; initializer != nil {
-					checkAssignmentFull(assignment.Name(), initializer, nil, assignmentRelationRange(ctx.SourceFile, assignment.Name(), initializer))
+					checkAssignmentFull(assignment.Name(), initializer, nil, nil)
 				}
 			},
 
@@ -643,7 +687,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 					id,
 					init,
 					node.Type(),
-					assignmentRelationRange(ctx.SourceFile, id, init),
+					nil,
 					getComparisonType(node),
 				)
 
@@ -682,7 +726,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 						node.Name(),
 						init,
 						nil,
-						assignmentRelationRange(ctx.SourceFile, node.Name(), init),
+						nil,
 						comparisonTypeContextual,
 					)
 				}
@@ -722,7 +766,7 @@ var NoUnsafeAssignmentRule = rule.Rule{
 					node.Name(),
 					expr,
 					nil,
-					assignmentRelationRange(ctx.SourceFile, node.Name(), expr),
+					nil,
 					comparisonTypeContextual,
 				)
 			},
